@@ -40,6 +40,7 @@ CONF_TIME_STAMP = "timestamp"
 CONF_PULSES = "pulses"
 CONF_COST = "cost"
 CONF_DAILY_PULSES = "daily_pulses"
+CONF_INSTANT_POWER = "instant_power"
 CONF_HTTP_REQUEST_ID = "http_request_id"
 
 def _validate(config):
@@ -93,6 +94,12 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(Powerpal),
             cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
             cv.Optional(CONF_POWER): sensor.sensor_schema(
+                unit_of_measurement=UNIT_WATT,
+                accuracy_decimals=0,
+                device_class=DEVICE_CLASS_POWER,
+                state_class=STATE_CLASS_MEASUREMENT,
+            ),
+            cv.Optional(CONF_INSTANT_POWER): sensor.sensor_schema(
                 unit_of_measurement=UNIT_WATT,
                 accuracy_decimals=0,
                 device_class=DEVICE_CLASS_POWER,
@@ -153,6 +160,10 @@ async def to_code(config):
     if CONF_POWER in config:
         sens = await sensor.new_sensor(config[CONF_POWER])
         cg.add(var.set_power_sensor(sens))
+        
+    if CONF_INSTANT_POWER in config:
+        sens = await sensor.new_sensor(config[CONF_INSTANT_POWER])
+        cg.add(var.set_instant_power_sensor(sens))
 
     if CONF_ENERGY in config:
         sens = await sensor.new_sensor(config[CONF_ENERGY])

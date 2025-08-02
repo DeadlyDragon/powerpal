@@ -37,6 +37,11 @@ sensor:
     ble_client_id: powerpal
     power:
       name: "Powerpal Power"
+    instant_power:
+      name: "Powerpal Instant Power"
+      unit_of_measurement: "W"
+      device_class: power
+      state_class: measurement
     battery_level:
       name: "Powerpal Battery"
     daily_energy:

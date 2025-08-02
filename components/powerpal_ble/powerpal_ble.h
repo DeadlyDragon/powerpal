@@ -52,6 +52,8 @@ static const espbt::ESPBTUUID POWERPAL_CHARACTERISTIC_UUID_UUID =
     espbt::ESPBTUUID::from_raw("59DA0009-12F4-25A6-7D4F-55961DCE4205");  // indicate, notify, read, write
 static const espbt::ESPBTUUID POWERPAL_CHARACTERISTIC_SERIAL_UUID =
     espbt::ESPBTUUID::from_raw("59DA0010-12F4-25A6-7D4F-55961DCE4205");  // indicate, notify, read, write
+static const espbt::ESPBTUUID POWERPAL_CHARACTERISTIC_MILLISSINCELASTPULSE_UUID =
+    espbt::ESPBTUUID::from_raw("59DA0012-12F4-25A6-7D4F-55961DCE4205");  // read
 
 static const espbt::ESPBTUUID POWERPAL_BATTERY_SERVICE_UUID = espbt::ESPBTUUID::from_uint16(0x180F);
 static const espbt::ESPBTUUID POWERPAL_BATTERY_CHARACTERISTIC_UUID = espbt::ESPBTUUID::from_uint16(0x2A19);
@@ -84,6 +86,7 @@ class Powerpal : public esphome::ble_client::BLEClientNode, public Component {
   void set_watt_hours(sensor::Sensor *watt_hours_sensor) {watt_hours_sensor_ = watt_hours_sensor;}
   void set_timestamp(sensor::Sensor *timestamp_sensor) { timestamp_sensor_ = timestamp_sensor;}
   void set_daily_pulses_sensor(sensor::Sensor *daily_pulses_sensor) { daily_pulses_sensor_ = daily_pulses_sensor;}
+  void set_instant_power_sensor(sensor::Sensor *instant_power_sensor) { instant_power_sensor_ = instant_power_sensor; }
 #ifdef USE_TIME
   void set_time(time::RealTimeClock *time) { time_ = time; }
 #endif
@@ -130,6 +133,7 @@ class Powerpal : public esphome::ble_client::BLEClientNode, public Component {
   void decode_(const uint8_t *data, uint16_t length);
   void parse_battery_(const uint8_t *data, uint16_t length);
   void parse_measurement_(const uint8_t *data, uint16_t length);
+  void parse_millis_since_last_pulse_(const uint8_t *data, uint16_t length);
   void schedule_commit_(bool force = false);
   void send_pending_readings_();
  
@@ -148,6 +152,7 @@ class Powerpal : public esphome::ble_client::BLEClientNode, public Component {
   sensor::Sensor *daily_pulses_sensor_{nullptr};
   sensor::Sensor *watt_hours_sensor_{nullptr};
   sensor::Sensor *timestamp_sensor_{nullptr};
+  sensor::Sensor *instant_power_sensor_{nullptr};
  
 
 #ifdef USE_TIME
@@ -177,6 +182,7 @@ class Powerpal : public esphome::ble_client::BLEClientNode, public Component {
   uint16_t firmware_char_handle_ = 0x3b;
   uint16_t uuid_char_handle_ = 0x28;
   uint16_t serial_number_char_handle_ = 0x2b;
+  uint16_t millis_since_last_pulse_char_handle_ = 0x00;
 };
 
 }  

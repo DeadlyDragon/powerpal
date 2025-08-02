@@ -19,6 +19,7 @@ void Powerpal::dump_config() {
   ESP_LOGCONFIG(TAG, "POWERPAL");
   LOG_SENSOR(" ", "Battery", this->battery_);
   LOG_SENSOR(" ", "Power", this->power_sensor_);
+  LOG_SENSOR(" ", "Instant Power", this->instant_power_sensor_);
   LOG_SENSOR(" ", "Daily Energy", this->daily_energy_sensor_);
   LOG_SENSOR(" ", "Total Energy", this->energy_sensor_);
   }
@@ -108,6 +109,29 @@ void Powerpal::parse_battery_(const uint8_t *data, uint16_t length) {
   ESP_LOGD(TAG, "Battery: DEC(%d): 0x%s", length, this->pkt_to_hex_(data, length).c_str());
   if (length == 1) {
     this->battery_->publish_state(data[0]);
+  }
+}
+
+void Powerpal::parse_millis_since_last_pulse_(const uint8_t *data, uint16_t length) {
+  ESP_LOGD(TAG, "MillisSinceLastPulse: DEC(%d): 0x%s", length, this->pkt_to_hex_(data, length).c_str());
+  if (length != 4) {
+    ESP_LOGW(TAG, "parse_millis_since_last_pulse_: unexpected packet length (%hu)", length);
+    return;
+  }
+  
+  // Extract milliseconds value (little-endian format)
+  uint32_t millis = uint32_t(data[0]) |
+                   (uint32_t(data[1]) << 8) |
+                   (uint32_t(data[2]) << 16) |
+                   (uint32_t(data[3]) << 24);
+                   
+  // Calculate instantaneous power based on pulses per kWh and time between pulses
+  if (millis > 0 && this->instant_power_sensor_ != nullptr) {
+    // Convert pulse interval to power: 
+    // Power (W) = (3600 * 1000 / millis) * (1000 / pulses_per_kwh)
+    float power_w = (3600.0f * 1000.0f * 1000.0f) / (float(millis) * this->pulses_per_kwh_);
+    this->instant_power_sensor_->publish_state(power_w);
+    ESP_LOGD(TAG, "Instant power: %.2f W (millis since last pulse: %u)", power_w, millis);
   }
 }
 
@@ -350,6 +374,13 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
         this->serial_number_char_handle_ = ch->handle;
         ESP_LOGI(TAG, "  → serial handle = 0x%02x", ch->handle);
       }
+      // Millis since last pulse (for instant power)
+      if (auto *ch = this->parent_->get_characteristic(POWERPAL_SERVICE_UUID, POWERPAL_CHARACTERISTIC_MILLISSINCELASTPULSE_UUID)) {
+        this->millis_since_last_pulse_char_handle_ = ch->handle;
+        ESP_LOGI(TAG, "  → millis_since_last_pulse handle = 0x%02x", ch->handle);
+      } else {
+        ESP_LOGE(TAG, "  ! millis_since_last_pulse characteristic not found");
+      }
 
       break;
     }
@@ -406,6 +437,13 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
       if (param->read.handle == this->led_sensitivity_char_handle_) {
         ESP_LOGD(TAG, "Received led sensitivity read event");
         this->decode_(param->read.value, param->read.value_len);
+        break;
+      }
+      
+      // millis since last pulse
+      if (param->read.handle == this->millis_since_last_pulse_char_handle_) {
+        ESP_LOGD(TAG, "Received millis since last pulse read event");
+        this->parse_millis_since_last_pulse_(param->read.value, param->read.value_len);
         break;
       }
 
@@ -494,6 +532,28 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
                                     this->led_sensitivity_char_handle_, ESP_GATT_AUTH_REQ_NONE);
         if (read_led_sensitivity_status) {
           ESP_LOGW(TAG, "Error sending read request for led sensitivity, status=%d", read_led_sensitivity_status);
+        }
+        
+        // Set up periodic reading of millis since last pulse for instant power
+        if (this->instant_power_sensor_ != nullptr) {
+          // Initial read
+          auto read_millis_status = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
+                                                     this->millis_since_last_pulse_char_handle_, ESP_GATT_AUTH_REQ_NONE);
+          if (read_millis_status) {
+            ESP_LOGW(TAG, "Error sending read request for millis since last pulse, status=%d", read_millis_status);
+          }
+          
+          // Set up 5-second timer for subsequent reads
+          App.register_component(this);
+          App.set_interval(5000, [this]() {
+            if (this->authenticated_) {
+              auto status = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
+                                                     this->millis_since_last_pulse_char_handle_, ESP_GATT_AUTH_REQ_NONE);
+              if (status) {
+                ESP_LOGW(TAG, "Error sending read request for millis since last pulse, status=%d", status);
+              }
+            }
+          });
         }
 
         break;
