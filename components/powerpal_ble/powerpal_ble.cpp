@@ -120,10 +120,16 @@ void Powerpal::parse_millis_since_last_pulse_(const uint8_t *data, uint16_t leng
                    (uint32_t(data[3]) << 24);
                    
   // Calculate instantaneous power based on pulses per kWh and time between pulses
-  if (millis > 0 && this->instant_power_sensor_ != nullptr) {
-    // Convert pulse interval to power: 
-    // Power (W) = (3600 * 1000 / millis) * (1000 / pulses_per_kwh)
-    float power_w = (3600.0f * 1000.0f * 1000.0f) / (float(millis) * this->pulses_per_kwh_);
+  if (this->instant_power_sensor_ != nullptr) {
+    float power_w;
+    if (millis > 0) {
+      // Convert pulse interval to power: 
+      // Power (W) = (3600 * 1000 / millis) * (1000 / pulses_per_kwh)
+      power_w = (3600.0f * 1000.0f * 1000.0f) / (float(millis) * this->pulses_per_kwh_);
+    } else {
+      // millis = 0 means no recent pulse, so power is 0
+      power_w = 0.0f;
+    }
     this->instant_power_sensor_->publish_state(power_w);
     ESP_LOGD(TAG, "Instant power: %.2f W (millis since last pulse: %u)", power_w, millis);
   }
