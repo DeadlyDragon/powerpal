@@ -30,6 +30,7 @@ Powerpal = powerpal_ble_ns.class_("Powerpal", ble_client.BLEClientNode, cg.Compo
 
 CONF_PAIRING_CODE = "pairing_code"
 CONF_NOTIFICATION_INTERVAL = "notification_interval"
+CONF_INSTANT_POWER_INTERVAL = "instant_power_interval"
 CONF_PULSES_PER_KWH = "pulses_per_kwh"
 CONF_COST_PER_KWH = "cost_per_kwh"
 CONF_POWERPAL_DEVICE_ID = "powerpal_device_id"
@@ -126,6 +127,7 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Required(CONF_PAIRING_CODE): cv.int_range(min=1, max=999999),
             cv.Required(CONF_NOTIFICATION_INTERVAL): cv.int_range(min=1, max=60),
+            cv.Optional(CONF_INSTANT_POWER_INTERVAL, default=5): cv.int_range(min=1, max=60),
             cv.Required(CONF_PULSES_PER_KWH): cv.float_range(min=1),
             cv.Optional(CONF_BATTERY_LEVEL): sensor.sensor_schema(
                 unit_of_measurement=UNIT_PERCENT,
@@ -195,6 +197,9 @@ async def to_code(config):
 
     if CONF_NOTIFICATION_INTERVAL in config:
         cg.add(var.set_notification_interval(config[CONF_NOTIFICATION_INTERVAL]))
+
+    if CONF_INSTANT_POWER_INTERVAL in config:
+        cg.add(var.set_instant_power_interval(config[CONF_INSTANT_POWER_INTERVAL]))
 
     if CONF_PULSES_PER_KWH in config:
         cg.add(var.set_pulses_per_kwh(config[CONF_PULSES_PER_KWH]))

@@ -1,6 +1,7 @@
 #include "powerpal_ble.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/application.h"
 
 #include <nvs_flash.h>
 #include <nvs.h>
@@ -480,9 +481,9 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
             ESP_LOGW(TAG, "Error sending read request for millis since last pulse, status=%d", read_millis_status);
           }
           
-          // Set up 5-second timer for subsequent reads
+          // Set up configurable timer for subsequent reads
           App.register_component(this);
-          App.set_interval(5000, [this]() {
+          App.set_interval(this->instant_power_interval_ * 1000, [this]() {
             if (this->authenticated_) {
               auto status = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
                                                      this->millis_since_last_pulse_char_handle_, ESP_GATT_AUTH_REQ_NONE);

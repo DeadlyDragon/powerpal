@@ -93,6 +93,7 @@ class Powerpal : public esphome::ble_client::BLEClientNode, public Component {
     pairing_code_[3] = (pairing_code & 0xFF000000) >> 24;
   }
   void set_notification_interval(uint8_t reading_batch_size) { reading_batch_size_[0] = reading_batch_size; }
+  void set_instant_power_interval(uint8_t instant_power_interval) { instant_power_interval_ = instant_power_interval; }
   void set_device_id(std::string powerpal_device_id) { powerpal_device_id_ = powerpal_device_id; }
   void set_apikey(std::string powerpal_apikey) { powerpal_apikey_ = powerpal_apikey; }
   void set_energy_cost(double energy_cost) { energy_cost_ = energy_cost; }
@@ -145,6 +146,7 @@ class Powerpal : public esphome::ble_client::BLEClientNode, public Component {
 
   uint8_t pairing_code_[4];
   uint8_t reading_batch_size_[4] = {0x01, 0x00, 0x00, 0x00};
+  uint8_t instant_power_interval_{5};  // Default to 5 seconds
   float pulses_per_kwh_;
   float pulse_multiplier_;
   
