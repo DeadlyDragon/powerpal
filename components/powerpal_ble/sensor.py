@@ -1,7 +1,7 @@
 import logging
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import sensor, ble_client, time
+from esphome.components import sensor, ble_client, time, http_request
 from esphome.const import (
     CONF_ID,
     CONF_BATTERY_LEVEL,
@@ -30,7 +30,6 @@ Powerpal = powerpal_ble_ns.class_("Powerpal", ble_client.BLEClientNode, cg.Compo
 
 CONF_PAIRING_CODE = "pairing_code"
 CONF_NOTIFICATION_INTERVAL = "notification_interval"
-CONF_INSTANT_POWER_INTERVAL = "instant_power_interval"
 CONF_PULSES_PER_KWH = "pulses_per_kwh"
 CONF_COST_PER_KWH = "cost_per_kwh"
 CONF_POWERPAL_DEVICE_ID = "powerpal_device_id"
@@ -41,7 +40,7 @@ CONF_TIME_STAMP = "timestamp"
 CONF_PULSES = "pulses"
 CONF_COST = "cost"
 CONF_DAILY_PULSES = "daily_pulses"
-CONF_INSTANT_POWER = "instant_power"
+CONF_HTTP_REQUEST_ID = "http_request_id"
 
 def _validate(config):
     if CONF_DAILY_ENERGY in config and CONF_TIME_ID not in config:
@@ -99,12 +98,6 @@ CONFIG_SCHEMA = cv.All(
                 device_class=DEVICE_CLASS_POWER,
                 state_class=STATE_CLASS_MEASUREMENT,
             ),
-            cv.Optional(CONF_INSTANT_POWER): sensor.sensor_schema(
-                unit_of_measurement=UNIT_WATT,
-                accuracy_decimals=0,
-                device_class=DEVICE_CLASS_POWER,
-                state_class=STATE_CLASS_MEASUREMENT,
-            ),
             cv.Optional(CONF_DAILY_ENERGY): sensor.sensor_schema(
                 unit_of_measurement=UNIT_KILOWATT_HOURS,
                 accuracy_decimals=3,
@@ -127,7 +120,6 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Required(CONF_PAIRING_CODE): cv.int_range(min=1, max=999999),
             cv.Required(CONF_NOTIFICATION_INTERVAL): cv.int_range(min=1, max=60),
-            cv.Optional(CONF_INSTANT_POWER_INTERVAL, default=5): cv.int_range(min=1, max=60),
             cv.Required(CONF_PULSES_PER_KWH): cv.float_range(min=1),
             cv.Optional(CONF_BATTERY_LEVEL): sensor.sensor_schema(
                 unit_of_measurement=UNIT_PERCENT,
@@ -136,6 +128,7 @@ CONFIG_SCHEMA = cv.All(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
             cv.Optional(CONF_COST_PER_KWH): cv.float_range(min=0),
+            cv.Optional(CONF_HTTP_REQUEST_ID): cv.use_id(http_request.HttpRequestComponent),
             cv.Optional(
                 CONF_POWERPAL_DEVICE_ID
             ): powerpal_deviceid,  # deviceid (optional) # if not configured, will grab from device
@@ -160,10 +153,6 @@ async def to_code(config):
     if CONF_POWER in config:
         sens = await sensor.new_sensor(config[CONF_POWER])
         cg.add(var.set_power_sensor(sens))
-        
-    if CONF_INSTANT_POWER in config:
-        sens = await sensor.new_sensor(config[CONF_INSTANT_POWER])
-        cg.add(var.set_instant_power_sensor(sens))
 
     if CONF_ENERGY in config:
         sens = await sensor.new_sensor(config[CONF_ENERGY])
@@ -198,9 +187,6 @@ async def to_code(config):
     if CONF_NOTIFICATION_INTERVAL in config:
         cg.add(var.set_notification_interval(config[CONF_NOTIFICATION_INTERVAL]))
 
-    if CONF_INSTANT_POWER_INTERVAL in config:
-        cg.add(var.set_instant_power_interval(config[CONF_INSTANT_POWER_INTERVAL]))
-
     if CONF_PULSES_PER_KWH in config:
         cg.add(var.set_pulses_per_kwh(config[CONF_PULSES_PER_KWH]))
 
@@ -211,6 +197,10 @@ async def to_code(config):
 
     if CONF_COST_PER_KWH in config:
         cg.add(var.set_energy_cost(config[CONF_COST_PER_KWH]))
+
+    if CONF_HTTP_REQUEST_ID in config:
+        http = await cg.get_variable(config[CONF_HTTP_REQUEST_ID])
+        cg.add(var.set_http_request(http))
 
     if CONF_POWERPAL_DEVICE_ID in config:
         cg.add(var.set_device_id(config[CONF_POWERPAL_DEVICE_ID]))

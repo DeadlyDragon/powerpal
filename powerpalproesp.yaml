@@ -37,11 +37,6 @@ sensor:
     ble_client_id: powerpal
     power:
       name: "Powerpal Power"
-    instant_power:
-      name: "Powerpal Instant Power"
-      unit_of_measurement: "W"
-      device_class: power
-      state_class: measurement
     battery_level:
       name: "Powerpal Battery"
     daily_energy:
@@ -60,7 +55,6 @@ sensor:
       name: "Powerpal Cost"
     pairing_code: 123456  # << EDIT HERE
     notification_interval: 1 # In seconds
-    instant_power_interval: 3 # In seconds (default: 5)
     pulses_per_kwh: 1000
     time_id: homeassistant_time
 

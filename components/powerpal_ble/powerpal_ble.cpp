@@ -1,9 +1,12 @@
 #include "powerpal_ble.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/application.h"
 
 #include <nvs_flash.h>
 #include <nvs.h>
+#include <vector>
+#include <cstdio>
 
 #ifdef USE_ESP32
 namespace esphome {
@@ -16,7 +19,6 @@ void Powerpal::dump_config() {
   ESP_LOGCONFIG(TAG, "POWERPAL");
   LOG_SENSOR(" ", "Battery", this->battery_);
   LOG_SENSOR(" ", "Power", this->power_sensor_);
-  LOG_SENSOR(" ", "Instant Power", this->instant_power_sensor_);
   LOG_SENSOR(" ", "Daily Energy", this->daily_energy_sensor_);
   LOG_SENSOR(" ", "Total Energy", this->energy_sensor_);
   }
@@ -24,8 +26,8 @@ void Powerpal::dump_config() {
 void Powerpal::setup() {
   this->authenticated_ = false;
   this->pulse_multiplier_ = ((seconds_in_minute * this->reading_batch_size_[0]) / (this->pulses_per_kwh_ / kw_to_w_conversion));
-  
-    // ——— NVS init & load ———
+
+  // ——— NVS init & load ———
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
@@ -38,6 +40,13 @@ void Powerpal::setup() {
     ESP_LOGE(TAG, "NVS open failed (%d)", err);
   } else {
     this->nvs_ok_ = true;
+    // increase queue depth so we are less likely to drop commits
+    this->nvs_queue_ = xQueueCreate(4, sizeof(NVSCommitData));
+    if (this->nvs_queue_) {
+      xTaskCreate(&Powerpal::nvs_commit_task, "pp_nvs", 4096, this, 1, &this->nvs_task_);
+    } else {
+      ESP_LOGW(TAG, "Failed to create NVS queue");
+    }
     uint64_t stored = 0;
     err = nvs_get_u64(this->nvs_handle_, "daily", &stored);
     if (err == ESP_OK) {
@@ -50,22 +59,19 @@ void Powerpal::setup() {
     }
 
     uint64_t stored_total = 0;
-    esp_err_t err = nvs_get_u64(this->nvs_handle_, "total", &stored_total);
-    if (err == ESP_OK) {
+    esp_err_t err_total = nvs_get_u64(this->nvs_handle_, "total", &stored_total);
+    if (err_total == ESP_OK) {
       this->total_pulses_ = stored_total;
       ESP_LOGI(TAG, "Loaded total_pulses: %llu", stored_total);
-    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+    } else if (err_total == ESP_ERR_NVS_NOT_FOUND) {
       ESP_LOGI(TAG, "No stored total_pulses; starting at zero");
     } else {
-      ESP_LOGE(TAG, "Error reading total_pulses (%d)", err);
+      ESP_LOGE(TAG, "Error reading total_pulses (%d)", err_total);
     }
 
     ESP_LOGI(TAG, "After setup, total_pulses_ = %llu", this->total_pulses_);
-
   }
-  
-  
-  
+
   ESP_LOGI(TAG, "pulse_multiplier_: %f", this->pulse_multiplier_);
   ESP_LOGI(TAG, "Loaded persisted daily_pulses: %llu", this->daily_pulses_);
 
@@ -77,10 +83,18 @@ void Powerpal::setup() {
   }
   if (this->daily_energy_sensor_) {
     this->daily_energy_sensor_->set_device_class("energy");
-    this->daily_energy_sensor_->set_state_class(sensor::STATE_CLASS_MEASUREMENT);
+    this->daily_energy_sensor_->set_state_class(sensor::STATE_CLASS_TOTAL_INCREASING);
     this->daily_energy_sensor_->set_unit_of_measurement("kWh");
   }
 
+  // Ensure this component is registered so that the interval scheduler works
+  App.register_component(this);
+
+  // Schedule periodic HTTP uploads independent of NVS commits
+  this->set_interval("pp_upload", COMMIT_INTERVAL_S * 1000, [this]() {
+    ESP_LOGD(TAG, "Periodic upload triggered"); 
+    this->send_pending_readings_();
+  });
 }
 
 
@@ -106,35 +120,6 @@ void Powerpal::parse_battery_(const uint8_t *data, uint16_t length) {
   }
 }
 
-void Powerpal::parse_millis_since_last_pulse_(const uint8_t *data, uint16_t length) {
-  ESP_LOGD(TAG, "MillisSinceLastPulse: DEC(%d): 0x%s", length, this->pkt_to_hex_(data, length).c_str());
-  if (length != 4) {
-    ESP_LOGW(TAG, "parse_millis_since_last_pulse_: unexpected packet length (%hu)", length);
-    return;
-  }
-  
-  // Extract milliseconds value (little-endian format)
-  uint32_t millis = uint32_t(data[0]) |
-                   (uint32_t(data[1]) << 8) |
-                   (uint32_t(data[2]) << 16) |
-                   (uint32_t(data[3]) << 24);
-                   
-  // Calculate instantaneous power based on pulses per kWh and time between pulses
-  if (this->instant_power_sensor_ != nullptr) {
-    float power_w;
-    if (millis > 0) {
-      // Convert pulse interval to power: 
-      // Power (W) = (3600 * 1000 / millis) * (1000 / pulses_per_kwh)
-      power_w = (3600.0f * 1000.0f * 1000.0f) / (float(millis) * this->pulses_per_kwh_);
-    } else {
-      // millis = 0 means no recent pulse, so power is 0
-      power_w = 0.0f;
-    }
-    this->instant_power_sensor_->publish_state(power_w);
-    ESP_LOGD(TAG, "Instant power: %.2f W (millis since last pulse: %u)", power_w, millis);
-  }
-}
-
 void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
   if (length < 6) {
     ESP_LOGW(TAG, "parse_measurement_: packet too short (%hu)", length);
@@ -151,10 +136,15 @@ void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
   // 2) Determine day-of-year for rollover
   int today;
 #ifdef USE_TIME
-  auto *time_comp = *this->time_;
-  auto now = time_comp->now();
-  if (now.is_valid()) {
-    today = now.day_of_year;
+  if (this->time_.has_value()) {
+    auto *time_comp = *this->time_;
+    auto now = time_comp->now();
+    if (now.is_valid()) {
+      today = now.day_of_year;
+    } else {
+      struct tm *tm_info = ::localtime(&unix_time);
+      today = tm_info->tm_yday + 1;
+    }
   } else {
     struct tm *tm_info = ::localtime(&unix_time);
     today = tm_info->tm_yday + 1;
@@ -165,19 +155,13 @@ void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
 #endif
 
   // 3) First-measurement vs midnight-rollover
+  bool force_commit = false;
   if (this->day_of_last_measurement_ == 0) {
     this->day_of_last_measurement_ = today;
   } else if (this->day_of_last_measurement_ != today) {
     this->day_of_last_measurement_ = today;
     this->daily_pulses_ = 0;
-    if (this->nvs_ok_) {
-      ESP_LOGD(TAG, "NVS rollover commit at day change, resetting daily_pulses");
-      nvs_erase_key(this->nvs_handle_, "daily");
-      nvs_commit(this->nvs_handle_);
-      this->last_commit_ts_ = millis() / 1000;
-      this->last_pulses_for_threshold_ = this->total_pulses_;
-      ++this->nvsc_commit_count_;
-    }
+    force_commit = true;
   }
 
   // 4) Read pulse count for this interval
@@ -197,10 +181,9 @@ void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
   }
 
   // 6) Cost for this interval
-  if (this->cost_sensor_) {
-    float cost = (float(pulses) / this->pulses_per_kwh_) * this->energy_cost_;
+  float cost = (float(pulses) / this->pulses_per_kwh_) * this->energy_cost_;
+  if (this->cost_sensor_)
     this->cost_sensor_->publish_state(cost);
-  }
 
   // 7) Raw pulses
   if (this->pulses_sensor_)
@@ -208,14 +191,15 @@ void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
 
   // 8) Watt-hours for this interval
   float wh = (float(pulses) / this->pulses_per_kwh_) * 1000.0f;
+  uint32_t wh_int = (uint32_t) roundf(wh);
   if (this->watt_hours_sensor_)
-    this->watt_hours_sensor_->publish_state((int)roundf(wh));
+    this->watt_hours_sensor_->publish_state((int)wh_int);
 
   // 9) Timestamp
   if (this->timestamp_sensor_)
     this->timestamp_sensor_->publish_state((long)unix_time);
 
-  // 10 & 11) Accumulate and throttled NVS commit for Total & Daily Energy
+  // 10 & 11) Accumulate totals then queue commit via scheduled task
   this->total_pulses_ += pulses;
   float total_kwh = this->total_pulses_ / this->pulses_per_kwh_;
   if (this->energy_sensor_)
@@ -226,29 +210,118 @@ void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
   if (this->daily_energy_sensor_)
     this->daily_energy_sensor_->publish_state(daily_kwh);
 
-  if (this->nvs_ok_) {
-    uint32_t now_s = millis() / 1000;
-    bool time_ok = (now_s - this->last_commit_ts_) >= COMMIT_INTERVAL_S;
-    bool thresh_ok = (this->total_pulses_ - this->last_pulses_for_threshold_) >= PULSE_THRESHOLD;
-    if (time_ok || thresh_ok) {
-      ESP_LOGD(TAG, "NVS THROTTLED commit #%u at %us: total=%llu daily=%llu",
-               ++this->nvsc_commit_count_, now_s,
-               this->total_pulses_, this->daily_pulses_);
-      nvs_set_u64(this->nvs_handle_, "total", this->total_pulses_);
-      nvs_set_u64(this->nvs_handle_, "daily", this->daily_pulses_);
-      esp_err_t err = nvs_commit(this->nvs_handle_);
-      if (err != ESP_OK)
-        ESP_LOGE(TAG, "NVS commit failed (%d)", err);
-      this->last_commit_ts_ = now_s;
-      this->last_pulses_for_threshold_ = this->total_pulses_;
-    }
-  }
+  PowerpalMeasurement measurement{pulses, unix_time, wh_int, cost};
+  this->stored_measurements_.push_back(measurement);
+
+  this->schedule_commit_(force);
 
   if (this->daily_pulses_sensor_)
     this->daily_pulses_sensor_->publish_state(this->daily_pulses_);
 }
 
+void Powerpal::send_pending_readings_() {
+  if (this->upload_in_progress_) {
+    ESP_LOGW(TAG, "Upload already in progress; skipping"); 
+    return;
+  }
 
+  ESP_LOGI(TAG, "Preparing to upload %u stored measurements",
+           (unsigned) this->stored_measurements_.size());
+  if (this->stored_measurements_.empty()) {
+    ESP_LOGI(TAG, "No stored measurements to send");
+    return;
+  }
+  if (this->http_request_ == nullptr) {
+    ESP_LOGE(TAG, "HTTP request component not configured");
+    return;
+  }
+
+  this->upload_in_progress_ = true;
+  ESP_LOGI(TAG, "Uploading %u stored measurements", (unsigned) this->stored_measurements_.size());
+
+  // Make a copy so if we decide to retry we can keep original stored_measurements_
+  std::vector<PowerpalMeasurement> measurements_copy = this->stored_measurements_;
+
+  std::string payload = "[";
+  for (size_t i = 0; i < measurements_copy.size(); ++i) {
+    const auto &m = measurements_copy[i];
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "{\"cost\":%.11f,\"is_peak\":false,\"pulses\":%u,\"timestamp\":%ld,\"watt_hours\":%u}",
+             m.cost, m.pulses, (long)m.timestamp, m.watt_hours);
+    if (i != 0)
+      payload += ", ";
+    payload += buf;
+  }
+  payload += "]";
+
+  char url[256];
+  snprintf(url, sizeof(url),
+           "https://readings.powerpal.net/api/v1/meter_reading/%s",
+           this->powerpal_device_id_.c_str());
+
+  std::vector<http_request::Header> headers{
+      http_request::Header{"Authorization", this->powerpal_apikey_},
+      http_request::Header{"Content-Type", "application/json"},
+  };
+
+  ESP_LOGI(TAG, "POST %s", url);
+  ESP_LOGI(TAG, "Payload: %s", payload.c_str());
+  for (const auto &h : headers)
+    ESP_LOGD(TAG, "Header: %s: %s", h.name.c_str(), h.value.c_str());
+
+  this->http_request_->send(http_request::HTTPMethod::HTTP_POST, url, headers, payload);
+
+  // Note: currently we clear the buffer immediately; if you want to only clear on confirmed successful
+  // response, hook into the HTTP request's response callback and clear then instead.
+  this->stored_measurements_.clear();
+  this->upload_in_progress_ = false;
+}
+
+void Powerpal::schedule_commit_(bool force) {
+  App.schedule([this, force]() {
+    uint32_t now_s = millis() / 1000;
+    bool time_ok = (now_s - this->last_commit_ts_) >= COMMIT_INTERVAL_S;
+    bool thresh_ok = (this->total_pulses_ - this->last_pulses_for_threshold_) >= PULSE_THRESHOLD;
+    if (force || time_ok || thresh_ok) {
+      ESP_LOGD(TAG, "Commit #%u at %us: total=%llu daily=%llu",
+               this->nvsc_commit_count_ + 1, now_s,
+               this->total_pulses_, this->daily_pulses_);
+      if (this->nvs_ok_ && this->nvs_queue_) {
+        NVSCommitData data{this->total_pulses_, this->daily_pulses_};
+        if (xQueueSend(this->nvs_queue_, &data, 0) != pdTRUE) {
+          ESP_LOGW(TAG, "NVS queue full; commit skipped");
+        }
+      }
+      this->last_commit_ts_ = now_s;
+      this->last_pulses_for_threshold_ = this->total_pulses_;
+      ++this->nvsc_commit_count_;
+    }
+  });
+}
+
+
+
+void Powerpal::nvs_commit_task(void *param) {
+  auto *self = static_cast<Powerpal *>(param);
+  NVSCommitData data;
+  for (;;) {
+    if (xQueueReceive(self->nvs_queue_, &data, portMAX_DELAY) == pdTRUE) {
+      esp_err_t set_total = nvs_set_u64(self->nvs_handle_, "total", data.total);
+      esp_err_t set_daily = nvs_set_u64(self->nvs_handle_, "daily", data.daily);
+      if (set_total != ESP_OK || set_daily != ESP_OK) {
+        ESP_LOGE(TAG, "NVS set_u64 failed (total: %d, daily: %d)", set_total, set_daily);
+        continue;
+      }
+      esp_err_t err = nvs_commit(self->nvs_handle_);
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS commit failed (%d)", err);
+      } else {
+        ESP_LOGI(TAG, "NVS commit succeeded: total=%llu daily=%llu", data.total, data.daily);
+      }
+    }
+  }
+}
 
 std::string Powerpal::uuid_to_device_id_(const uint8_t *data, uint16_t length) {
   const char* hexmap[] = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"};
@@ -317,13 +390,6 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
         this->serial_number_char_handle_ = ch->handle;
         ESP_LOGI(TAG, "  → serial handle = 0x%02x", ch->handle);
       }
-      // Millis since last pulse (for instant power)
-      if (auto *ch = this->parent_->get_characteristic(POWERPAL_SERVICE_UUID, POWERPAL_CHARACTERISTIC_MILLISSINCELASTPULSE_UUID)) {
-        this->millis_since_last_pulse_char_handle_ = ch->handle;
-        ESP_LOGI(TAG, "  → millis_since_last_pulse handle = 0x%02x", ch->handle);
-      } else {
-        ESP_LOGE(TAG, "  ! millis_since_last_pulse characteristic not found");
-      }
 
       break;
     }
@@ -349,7 +415,7 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
             }
           } else {
             // reading batch size is set correctly so subscribe to measurement notifications
-            auto status = esp_ble_gattc_register_for_notify(this->parent_->get_gattc_if(), this->parent_->get_remote_bda(),
+            auto status = esp_ble_gattc_register_for_notify(this->parent_->get_gattc_if(), this->parent()->get_remote_bda(),
                                                             this->measurement_char_handle_);
             if (status) {
               ESP_LOGW(TAG, "[%s] esp_ble_gattc_register_for_notify failed, status=%d",
@@ -383,25 +449,18 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
         break;
       }
 
-      // millis since last pulse
-      if (param->read.handle == this->millis_since_last_pulse_char_handle_) {
-        ESP_LOGD(TAG, "Received millis since last pulse read event");
-        this->parse_millis_since_last_pulse_(param->read.value, param->read.value_len);
-        break;
-      }
-
       // serial number (device id)
       if (param->read.handle == this->serial_number_char_handle_) {
-        ESP_LOGI(TAG, "Received uuid read event");
+        ESP_LOGI(TAG, "Received serial_number read event");
         this->powerpal_device_id_ = this->uuid_to_device_id_(param->read.value, param->read.value_len);
         ESP_LOGI(TAG, "Powerpal device id: %s", this->powerpal_device_id_.c_str());
 
         break;
       }
 
-      // uuid
+      // uuid (API key)
       if (param->read.handle == this->uuid_char_handle_) {
-        ESP_LOGI(TAG, "Received serial_number read event");
+        ESP_LOGI(TAG, "Received uuid read event");
         this->powerpal_apikey_ = this->serial_to_apikey_(param->read.value, param->read.value_len);
         ESP_LOGI(TAG, "Powerpal apikey: %s", this->powerpal_apikey_.c_str());
 
@@ -476,96 +535,14 @@ void Powerpal::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gat
         if (read_led_sensitivity_status) {
           ESP_LOGW(TAG, "Error sending read request for led sensitivity, status=%d", read_led_sensitivity_status);
         }
-        
-        // Set up periodic reading of millis since last pulse for instant power
-        if (this->instant_power_sensor_ != nullptr) {
-          // Initial read
-          auto read_millis_status = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
-                                                     this->millis_since_last_pulse_char_handle_, ESP_GATT_AUTH_REQ_NONE);
-          if (read_millis_status) {
-            ESP_LOGW(TAG, "Error sending read request for millis since last pulse, status=%d", read_millis_status);
-          }
-          
-          // Set up configurable timer for subsequent reads
-          this->schedule_instant_power_read_();
-        }
-
-        break;
-      }
-      if (param->write.handle == this->reading_batch_size_char_handle_) {
-        // reading batch size is now set correctly so subscribe to measurement notifications
-        auto status = esp_ble_gattc_register_for_notify(this->parent_->get_gattc_if(), this->parent_->get_remote_bda(),
-                                                        this->measurement_char_handle_);
-        if (status) {
-          ESP_LOGW(TAG, "[%s] esp_ble_gattc_register_for_notify failed, status=%d",
-                   this->parent_->address_str().c_str(), status);
-        }
-        break;
-      }
-
-      ESP_LOGW(TAG, "[%s] Missed all handle matches: %d",
-               this->parent_->address_str().c_str(), param->write.handle);
-      break;
-    }  // ESP_GATTC_WRITE_CHAR_EVT
-
-    case ESP_GATTC_NOTIFY_EVT: {
-      ESP_LOGD(TAG, "[%s] Received Notification", this->parent_->address_str().c_str());
-
-      // battery
-      if (param->notify.handle == this->battery_char_handle_) {
-        ESP_LOGD(TAG, "Received battery notify event");
-        this->parse_battery_(param->notify.value, param->notify.value_len);
-        break;
-      }
-
-      // measurement
-      if (param->notify.handle == this->measurement_char_handle_) {
-        ESP_LOGD(TAG, "Received measurement notify event");
-        this->parse_measurement_(param->notify.value, param->notify.value_len);
-        break;
-      }
-      break;  // registerForNotify
-    }
-    default:
-      break;
-  }
-}
-
-void Powerpal::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-  switch (event) {
-    // This event is sent once authentication has completed
-    case ESP_GAP_BLE_AUTH_CMPL_EVT: {
-      if (param->ble_security.auth_cmpl.success) {
-        ESP_LOGI(TAG, "[%s] Writing pairing code to Powerpal", this->parent_->address_str().c_str());
-        auto status = esp_ble_gattc_write_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
-                                               this->pairing_code_char_handle_, sizeof(this->pairing_code_),
-                                               this->pairing_code_, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
-        if (status) {
-          ESP_LOGW(TAG, "Error sending write request for pairing_code, status=%d", status);
-        }
       }
       break;
     }
     default:
       break;
   }
-}
-
-void Powerpal::schedule_instant_power_read_() {
-  this->set_timeout(this->instant_power_interval_ * 1000, [this]() {
-    if (this->authenticated_) {
-      auto status = esp_ble_gattc_read_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
-                                             this->millis_since_last_pulse_char_handle_, ESP_GATT_AUTH_REQ_NONE);
-      if (status) {
-        ESP_LOGW(TAG, "Error sending read request for millis since last pulse, status=%d", status);
-      }
-    }
-    // Schedule the next read
-    this->schedule_instant_power_read_();
-  });
 }
 
 }  // namespace powerpal_ble
 }  // namespace esphome
-
 #endif
