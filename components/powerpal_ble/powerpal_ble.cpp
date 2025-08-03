@@ -257,22 +257,23 @@ void Powerpal::send_pending_readings_() {
   }
   payload += "]";
 
-  char url[256];
-  snprintf(url, sizeof(url),
+  char url_buf[256];
+  snprintf(url_buf, sizeof(url_buf),
            "https://readings.powerpal.net/api/v1/meter_reading/%s",
            this->powerpal_device_id_.c_str());
+  std::string url = url_buf;
 
-  std::vector<http_request::Header> headers{
+  std::list<http_request::Header> headers{
       http_request::Header{"Authorization", this->powerpal_apikey_},
       http_request::Header{"Content-Type", "application/json"},
   };
 
-  ESP_LOGI(TAG, "POST %s", url);
+  ESP_LOGI(TAG, "POST %s", url.c_str());
   ESP_LOGI(TAG, "Payload: %s", payload.c_str());
   for (const auto &h : headers)
     ESP_LOGD(TAG, "Header: %s: %s", h.name.c_str(), h.value.c_str());
 
-  this->http_request_->post(url, headers, payload);
+  this->http_request_->post(url, payload, headers);
 
   // Note: currently we clear the buffer immediately; if you want to only clear on confirmed successful
   // response, hook into the HTTP request's response callback and clear then instead.
