@@ -7,6 +7,8 @@
 #include <nvs.h>
 #include <vector>
 #include <cstdio>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 #ifdef USE_ESP32
 namespace esphome {
@@ -270,7 +272,7 @@ void Powerpal::send_pending_readings_() {
   for (const auto &h : headers)
     ESP_LOGD(TAG, "Header: %s: %s", h.name.c_str(), h.value.c_str());
 
-  this->http_request_->send(http_request::HTTPMethod::HTTP_POST, url, headers, payload);
+  this->http_request_->post(url, headers, payload);
 
   // Note: currently we clear the buffer immediately; if you want to only clear on confirmed successful
   // response, hook into the HTTP request's response callback and clear then instead.
@@ -279,7 +281,7 @@ void Powerpal::send_pending_readings_() {
 }
 
 void Powerpal::schedule_commit_(bool force) {
-  App.scheduler([this, force]() {
+  this->set_timeout(0, [this, force]() {
     uint32_t now_s = millis() / 1000;
     bool time_ok = (now_s - this->last_commit_ts_) >= COMMIT_INTERVAL_S;
     bool thresh_ok = (this->total_pulses_ - this->last_pulses_for_threshold_) >= PULSE_THRESHOLD;
