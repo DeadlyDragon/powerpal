@@ -213,7 +213,7 @@ void Powerpal::parse_measurement_(const uint8_t *data, uint16_t length) {
   PowerpalMeasurement measurement{pulses, unix_time, wh_int, cost};
   this->stored_measurements_.push_back(measurement);
 
-  this->schedule_commit_(force);
+  this->schedule_commit_(true);
 
   if (this->daily_pulses_sensor_)
     this->daily_pulses_sensor_->publish_state(this->daily_pulses_);
@@ -279,7 +279,7 @@ void Powerpal::send_pending_readings_() {
 }
 
 void Powerpal::schedule_commit_(bool force) {
-  App.schedule([this, force]() {
+  App.scheduler([this, force]() {
     uint32_t now_s = millis() / 1000;
     bool time_ok = (now_s - this->last_commit_ts_) >= COMMIT_INTERVAL_S;
     bool thresh_ok = (this->total_pulses_ - this->last_pulses_for_threshold_) >= PULSE_THRESHOLD;
